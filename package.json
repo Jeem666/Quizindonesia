@@ -9,6 +9,11 @@
     "dev": "node --watch src/index.js",
     "register": "node src/deploy-commands.js"
   },
-  "engines": { "node": ">=24" },
-  "dependencies": { "discord.js": "^14.27.0" }
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0",
+    "dotenv": "^16.4.7"
+  }
 }
