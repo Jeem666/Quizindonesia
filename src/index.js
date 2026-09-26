@@ -10,7 +10,7 @@ const {
 } = require('discord.js');
 
 const questions = require('./data/questions');
-const typingQuestions = require('./typingquestions');
+const typingQuestions = require('./data/typingquestions');
 const words = require('./data/words');
 const store = require('./store');
 
