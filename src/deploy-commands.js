@@ -1,5 +1,11 @@
 require('dotenv').config();
-const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+
+const {
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits
+} = require('discord.js');
 
 const commands = [
   new SlashCommandBuilder()
@@ -8,9 +14,19 @@ const commands = [
     .addIntegerOption(o =>
       o
         .setName('jumlah')
-        .setDescription('Jumlah soal (1-15)')
+        .setDescription('Jumlah soal (1-100)')
         .setMinValue(1)
-        .setMaxValue(15)
+        .setMaxValue(100)
+    )
+    .addStringOption(o =>
+      o
+        .setName('kesulitan')
+        .setDescription('Pilih tingkat kesulitan')
+        .addChoices(
+          { name: 'Mudah', value: 'Mudah' },
+          { name: 'Sedang', value: 'Sedang' },
+          { name: 'Sulit', value: 'Sulit' }
+        )
     ),
 
   new SlashCommandBuilder()
@@ -22,6 +38,16 @@ const commands = [
         .setDescription('Jumlah soal (1-100)')
         .setMinValue(1)
         .setMaxValue(100)
+    )
+    .addStringOption(o =>
+      o
+        .setName('kesulitan')
+        .setDescription('Pilih tingkat kesulitan')
+        .addChoices(
+          { name: 'Mudah', value: 'Mudah' },
+          { name: 'Sedang', value: 'Sedang' },
+          { name: 'Sulit', value: 'Sulit' }
+        )
     ),
 
   new SlashCommandBuilder()
@@ -70,9 +96,13 @@ const rest = new REST({ version: '10' })
         process.env.CLIENT_ID,
         process.env.GUILD_ID
       )
-    : Routes.applicationCommands(process.env.CLIENT_ID);
+    : Routes.applicationCommands(
+        process.env.CLIENT_ID
+      );
 
-  await rest.put(route, { body: commands });
+  await rest.put(route, {
+    body: commands
+  });
 
   console.log(
     `Berhasil mendaftarkan ${commands.length} slash command.`
