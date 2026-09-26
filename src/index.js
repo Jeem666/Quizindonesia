@@ -153,22 +153,53 @@ async function startQuiz(interaction) {
   const jumlah =
     interaction.options.getInteger('jumlah') || 10;
 
+  const kesulitan =
+    interaction.options.getString('kesulitan');
+
+  let availableQuestions = [...questions];
+
+  if (kesulitan) {
+    availableQuestions = availableQuestions.filter(
+      q => q.difficulty === kesulitan
+    );
+  }
+
+  if (availableQuestions.length === 0) {
+    return interaction.reply({
+      content:
+        `❌ Tidak ada soal dengan tingkat kesulitan **${kesulitan}**.`,
+      ephemeral: true
+    });
+  }
+
+  const selected = shuffle(availableQuestions)
+    .slice(0, jumlah);
+
   const game = {
     type: 'quiz',
     index: 0,
-    questions: shuffle(questions).slice(0, jumlah),
+    questions: selected,
     scores: new Map(),
     message: null
   };
 
   games.set(interaction.channelId, game);
 
+  const difficultyText =
+    kesulitan || 'Semua tingkat kesulitan';
+
   await interaction.reply({
     content:
-      `🎯 **Quiz dimulai!** ${jumlah} soal. Siapa cepat dia dapat poin!`
+      `🎯 **Quiz dimulai!**\n` +
+      `📝 Soal: **${selected.length}**\n` +
+      `📊 Kesulitan: **${difficultyText}**\n\n` +
+      `Siapa cepat dia dapat poin!`
   });
 
-  await sendQuizQuestion(interaction.channel, game);
+  await sendQuizQuestion(
+    interaction.channel,
+    game
+  );
 }
 
 // =====================================================
@@ -217,14 +248,27 @@ async function startTypingQuiz(interaction) {
   const jumlah =
     interaction.options.getInteger('jumlah') || 10;
 
-  const selected = shuffle(typingQuestions).slice(0, jumlah);
+  const kesulitan =
+    interaction.options.getString('kesulitan');
 
-  if (selected.length === 0) {
+  let availableQuestions = [...typingQuestions];
+
+  if (kesulitan) {
+    availableQuestions = availableQuestions.filter(
+      q => q.difficulty === kesulitan
+    );
+  }
+
+  if (availableQuestions.length === 0) {
     return interaction.reply({
-      content: '❌ Belum ada soal di typingquestions.js.',
+      content:
+        `❌ Tidak ada soal typing quiz dengan tingkat kesulitan **${kesulitan}**.`,
       ephemeral: true
     });
   }
+
+  const selected = shuffle(availableQuestions)
+    .slice(0, jumlah);
 
   const game = {
     type: 'typingquiz',
@@ -236,14 +280,22 @@ async function startTypingQuiz(interaction) {
 
   games.set(interaction.channelId, game);
 
+  const difficultyText =
+    kesulitan || 'Semua tingkat kesulitan';
+
   await interaction.reply({
     content:
-      `⌨️ **Typing Quiz dimulai!** ${selected.length} soal. Ketik jawaban langsung di chat!`
+      `⌨️ **Typing Quiz dimulai!**\n` +
+      `📝 Soal: **${selected.length}**\n` +
+      `📊 Kesulitan: **${difficultyText}**\n\n` +
+      `Ketik jawaban langsung di chat!`
   });
 
-  await sendTypingQuestion(interaction.channel, game);
+  await sendTypingQuestion(
+    interaction.channel,
+    game
+  );
 }
-
 // =====================================================
 // SAMBUNG KATA
 // =====================================================
@@ -336,8 +388,8 @@ client.on('interactionCreate', async interaction => {
                 .setColor(COLORS.blue)
                 .setTitle('📚 Bantuan Bot')
                 .setDescription(
-                  '`/quiz [jumlah]` — mulai quiz\n' +
-                  '`/typingquiz [jumlah]` — quiz dengan mengetik jawaban\n' +
+                  '`/quiz [jumlah] [kesulitan]` — mulai quiz pilihan ganda\n' +
+                  '`/typingquiz [jumlah] [kesulitan]` — quiz dengan mengetik jawaban\n' +
                   '`/sambungkata` — mulai sambung kata\n' +
                   '`/skor [user]` — lihat statistik\n' +
                   '`/leaderboard` — peringkat global\n' +
