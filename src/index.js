@@ -104,5 +104,5 @@ client.on('messageCreate', async message => {
   resetWordTimeout(message.channel, game);
 });
 
-client.once('ready', () => console.log(`🤖 ${client.user.tag} online dan siap bermain!`));
+client.once('clientready', () => console.log(`🤖 ${client.user.tag} online dan siap bermain!`));
 client.login(process.env.DISCORD_TOKEN);
