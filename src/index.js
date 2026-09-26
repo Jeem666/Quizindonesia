@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const questions = require('./data/questions');
+const typingQuestions = require('./typingquestions');
 const words = require('./data/words');
 const store = require('./store');
 
@@ -38,7 +39,61 @@ async function startQuiz(interaction) {
   await interaction.reply({ content: `🎯 **Quiz dimulai!** ${jumlah} soal. Siapa cepat dia dapat poin!` });
   await sendQuizQuestion(interaction.channel, game);
 }
+function normalizeAnswer(text) {
+  return text
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
+async function startTypingQuiz(interaction) {
+  if (games.has(interaction.channelId)) {
+    return interaction.reply({
+      content: '⚠️ Sudah ada permainan aktif di channel ini. Gunakan `/stopgame` untuk menghentikannya.',
+      ephemeral: true
+    });
+  }
+
+  const jumlah = interaction.options.getInteger('jumlah') || 10;
+
+  const selected = shuffle(typingQuestions).slice(0, jumlah);
+
+  const game = {
+    type: 'typingquiz',
+    index: 0,
+    questions: selected,
+    scores: new Map(),
+    timeout: null
+  };
+
+  games.set(interaction.channelId, game);
+
+  await interaction.reply({
+    content: `⌨️ **Typing Quiz dimulai!** ${selected.length} soal. Ketik jawaban langsung di chat!`
+  });
+
+  await sendTypingQuestion(interaction.channel, game);
+}
+async function sendTypingQuestion(channel, game) {
+  const q = game.questions[game.index];
+
+  const embed = new EmbedBuilder()
+    .setColor(COLORS.purple)
+    .setTitle(`⌨️ Typing Quiz — Soal ${game.index + 1}/${game.questions.length}`)
+    .setDescription(`**${q.question}**`)
+    .addFields(
+      { name: 'Kategori', value: q.category, inline: true },
+      { name: 'Kesulitan', value: q.difficulty, inline: true }
+    )
+    .setFooter({
+      text: 'Ketik jawabanmu langsung di chat.'
+    });
+
+  await channel.send({ embeds: [embed] });
+}
 async function startWord(interaction) {
   if (games.has(interaction.channelId)) return interaction.reply({ content: '⚠️ Sudah ada permainan aktif di channel ini. Gunakan `/stopgame` untuk menghentikannya.', ephemeral: true });
   const word = words[Math.floor(Math.random() * words.length)];
@@ -92,7 +147,116 @@ client.on('interactionCreate', async interaction => {
 
 client.on('messageCreate', async message => {
   if (message.author.bot || !message.guild) return;
-  const game = games.get(message.channel.id); if (!game || game.type !== 'word') return;
+
+  const game = games.get(message.channel.id);
+  if (!game) return;
+
+  // =========================
+  // TYPING QUIZ
+  // =========================
+  if (game.type === 'typingquiz') {
+    const q = game.questions[game.index];
+
+    const userAnswer = normalizeAnswer(message.content);
+
+    const correctAnswers = q.answer.map(answer =>
+      normalizeAnswer(answer)
+    );
+
+    const correct = correctAnswers.includes(userAnswer);
+
+    if (!game.scores.has(message.author.id)) {
+      game.scores.set(message.author.id, {
+        points: 0,
+        correct: 0,
+        wrong: 0
+      });
+    }
+
+    const score = game.scores.get(message.author.id);
+
+    if (correct) {
+      score.points += 10;
+      score.correct++;
+
+      store.addStats(message.author, {
+        points: 10,
+        correct: 1,
+        games: 1
+      });
+
+      await message.reply(
+        `✅ **Benar!** ${mentionUser(message.author.id)} mendapat **+10 poin**!`
+      );
+
+      game.index++;
+
+      if (game.index >= game.questions.length) {
+        const ranking = [...game.scores.entries()]
+          .sort((a, b) => b[1].points - a[1].points);
+
+        const lines = ranking
+          .map(
+            ([id, s], i) =>
+              `${i + 1}. ${mentionUser(id)} — **${s.points} poin** (${s.correct} benar)`
+          )
+          .join('\n');
+
+        await message.channel.send({
+          embeds: [
+            new EmbedBuilder()
+              .setColor(COLORS.gold)
+              .setTitle('🏆 Typing Quiz selesai!')
+              .setDescription(lines || 'Belum ada jawaban.')
+          ]
+        });
+
+        games.delete(message.channel.id);
+        return;
+      }
+
+      await sendTypingQuestion(message.channel, game);
+    }
+
+    return;
+  }
+
+  // =========================
+  // SAMBUNG KATA
+  // =========================
+  if (game.type !== 'word') return;
+
+  const word = normalizeWord(message.content);
+
+  if (word.length < 3 || !/^[a-z]+$/.test(word)) return;
+
+  const expected = normalizeWord(game.current).slice(-1);
+
+  if (word[0] !== expected) return;
+
+  if (game.used.has(word)) {
+    return message.reply('🔁 Kata itu sudah dipakai. Coba kata lain.');
+  }
+
+  game.used.add(word);
+  game.current = word;
+  game.lastUser = message.author.id;
+  game.chain++;
+
+  store.addStats(message.author, {
+    points: 5,
+    correct: 1,
+    games: 1
+  });
+
+  await message.react('✅').catch(() => {});
+
+  await message.channel.send(
+    `🔗 **${word}** — ${mentionUser(message.author.id)} mendapat **+5 poin**! Selanjutnya harus diawali huruf **${word.slice(-1).toUpperCase()}**.`
+  );
+
+  resetWordTimeout(message.channel, game);
+});
   const word = normalizeWord(message.content); if (word.length < 3 || !/^[a-z]+$/.test(word)) return;
   const expected = normalizeWord(game.current).slice(-1);
   if (word[0] !== expected) return;
