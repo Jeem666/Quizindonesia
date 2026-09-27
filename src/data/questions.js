@@ -782,8 +782,7 @@ module.exports = [
     answer: 0,
     category: 'Matematika',
     difficulty: 'Mudah'
-  }
-];module.exports = [
+  },
   {
     question: 'Provinsi yang memiliki ibu kota Bandung adalah...',
     options: ['Jawa Barat', 'Jawa Tengah', 'Jawa Timur', 'Banten'],
@@ -1749,8 +1748,7 @@ module.exports = [
     answer: 1,
     category: 'Ekonomi',
     difficulty: 'Sedang'
-  }
-];module.exports = [
+  },
   {
     question: 'Prasasti Yupa merupakan peninggalan kerajaan...',
     options: ['Tarumanegara', 'Kutai', 'Sriwijaya', 'Kediri'],
