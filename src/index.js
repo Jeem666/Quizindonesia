@@ -11,11 +11,21 @@ const {
 
 const questions = require('./data/questions');
 const typingQuestions = require('./data/typingquestions');
-const words = require('./data/words');
+
+const {
+  normalizeWord,
+  isValidWord,
+  getRandomWord,
+  getWordCount
+} = require('./data/words');
+
 const store = require('./store');
 
-if (!process.env.DISCORD_TOKEN) {
-  throw new Error('DISCORD_TOKEN belum diatur.');
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+
+if (!DISCORD_TOKEN) {
+  console.error('❌ DISCORD_TOKEN belum ditemukan di file .env');
+  process.exit(1);
 }
 
 const client = new Client({
@@ -26,7 +36,19 @@ const client = new Client({
   ]
 });
 
+/*
+==================================================
+GAME STORAGE
+==================================================
+*/
+
 const games = new Map();
+
+/*
+==================================================
+WARNA EMBED
+==================================================
+*/
 
 const COLORS = {
   blue: 0x3498db,
@@ -36,103 +58,299 @@ const COLORS = {
   purple: 0x9b59b6
 };
 
+/*
+==================================================
+HELPER
+==================================================
+*/
+
 function mentionUser(id) {
   return `<@${id}>`;
 }
 
-function shuffle(arr) {
-  return [...arr].sort(() => Math.random() - 0.5);
+function shuffle(array) {
+  const arr = [...array];
+
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+
+  return arr;
 }
 
-function normalizeWord(s) {
-  return s
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z]/g, '');
+/*
+==================================================
+SAMBUNG KATA
+==================================================
+*/
+
+const WORD_GAME_TIME = 60 * 1000;
+
+/*
+Menentukan awalan yang harus dipakai
+untuk giliran sekarang.
+*/
+function updateRequiredLetters(game) {
+  const elapsed = Date.now() - game.startedAt;
+
+  /*
+  0 - 60 detik
+  Gunakan 1 huruf terakhir.
+  */
+  if (elapsed < WORD_GAME_TIME) {
+    game.requiredLetters =
+      game.current.slice(-1);
+
+    return game.requiredLetters;
+  }
+
+  /*
+  Setelah 60 detik:
+  random 2 atau 3 huruf terakhir.
+  */
+
+  const requestedLength =
+    Math.random() < 0.5 ? 2 : 3;
+
+  /*
+  Jangan meminta lebih panjang dari kata
+  yang tersedia.
+  */
+  const actualLength = Math.min(
+    requestedLength,
+    game.current.length
+  );
+
+  game.requiredLetters =
+    game.current.slice(-actualLength);
+
+  return game.requiredLetters;
 }
 
-function normalizeAnswer(text) {
-  return text
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^\p{L}\p{N}\s]/gu, '')
-    .replace(/\s+/g, ' ')
-    .trim();
+/*
+Reset timer 60 detik sejak jawaban terakhir.
+*/
+function resetWordTimeout(channel, game) {
+  if (game.timeout) {
+    clearTimeout(game.timeout);
+  }
+
+  game.timeout = setTimeout(() => {
+    if (games.get(channel.id) !== game) {
+      return;
+    }
+
+    channel.send(
+      `⏰ **Waktu habis!**\n\n` +
+      `Tidak ada jawaban selama **60 detik**.\n\n` +
+      `🔗 Rantai: **${game.chain}** kata\n` +
+      `🔤 Kata terakhir: **${game.current}**`
+    );
+
+    games.delete(channel.id);
+  }, WORD_GAME_TIME);
 }
 
-function quizButtons(disabled = false) {
-  return new ActionRowBuilder().addComponents(
-    ['A', 'B', 'C', 'D'].map((x, i) =>
-      new ButtonBuilder()
-        .setCustomId(`quiz:${i}`)
-        .setLabel(x)
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(disabled)
-    )
+/*
+Menambah kesalahan.
+*/
+async function wordMistake(message, game, reason) {
+  game.mistakes++;
+
+  /*
+  Kesalahan ketiga = game selesai.
+  */
+  if (game.mistakes >= 3) {
+    if (game.timeout) {
+      clearTimeout(game.timeout);
+    }
+
+    games.delete(message.channel.id);
+
+    await message.reply(
+      `❌ **Kesalahan 3/3!**\n\n` +
+      `${reason}\n\n` +
+      `🛑 **Permainan berakhir.**\n` +
+      `🔗 Rantai terakhir: **${game.chain}** kata.\n` +
+      `🔤 Kata terakhir: **${game.current}**`
+    );
+
+    return true;
+  }
+
+  await message.reply(
+    `❌ **Salah ${game.mistakes}/3**\n` +
+    `${reason}\n\n` +
+    `❤️ Kesempatan tersisa: **${3 - game.mistakes}**`
+  );
+
+  return false;
+}
+
+/*
+Mulai Sambung Kata.
+*/
+async function startWord(interaction) {
+  if (games.has(interaction.channelId)) {
+    return interaction.reply({
+      content:
+        '⚠️ Sudah ada permainan aktif di channel ini. Gunakan `/stopgame` untuk menghentikannya.',
+      ephemeral: true
+    });
+  }
+
+  const word = getRandomWord();
+
+  const game = {
+    type: 'word',
+
+    current: word,
+
+    used: new Set([
+      word
+    ]),
+
+    startedAt: Date.now(),
+
+    mistakes: 0,
+
+    lastUser: null,
+
+    chain: 0,
+
+    requiredLetters: null,
+
+    timeout: null
+  };
+
+  /*
+  Tentukan awalan pertama.
+  */
+  updateRequiredLetters(game);
+
+  games.set(
+    interaction.channelId,
+    game
+  );
+
+  await interaction.reply({
+    embeds: [
+      new EmbedBuilder()
+        .setColor(COLORS.purple)
+        .setTitle('🔗 Sambung Kata dimulai!')
+        .setDescription(
+          `🔤 Kata awal: **${word}**\n\n` +
+
+          `➡️ Kata berikutnya harus diawali:\n` +
+
+          `# **${game.requiredLetters.toUpperCase()}**\n\n` +
+
+          `🏆 Jawaban benar: **+5 poin**\n` +
+
+          `❤️ Kesalahan: **0/3**\n` +
+
+          `⏰ Waktu per jawaban: **60 detik**`
+        )
+        .addFields({
+          name: '📖 Aturan',
+          value:
+            '• Kata harus ada di database\n' +
+            '• Minimal 3 huruf\n' +
+            '• Tidak boleh mengulang kata\n' +
+            '• 0–60 detik menggunakan 1 huruf terakhir\n' +
+            '• Setelah 60 detik menggunakan 2 atau 3 huruf terakhir\n' +
+            '• Salah 3 kali → game berakhir\n' +
+            '• Jawaban benar → +5 poin'
+        })
+        .setFooter({
+          text:
+            `Database: ${getWordCount().toLocaleString('id-ID')} kata`
+        })
+    ]
+  });
+
+  resetWordTimeout(
+    interaction.channel,
+    game
   );
 }
 
-// =====================================================
-// QUIZ PILIHAN GANDA
-// =====================================================
+/*
+==================================================
+QUIZ
+==================================================
+*/
+
+function createQuizButtons(options, disabled = false) {
+  const row =
+    new ActionRowBuilder();
+
+  options.forEach((option, index) => {
+    row.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`quiz_${index}`)
+        .setLabel(
+          `${String.fromCharCode(65 + index)}. ${option}`
+        )
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(disabled)
+    );
+  });
+
+  return row;
+}
 
 async function sendQuizQuestion(channel, game) {
-  const q = game.questions[game.index];
+  if (game.index >= game.questions.length) {
+    return finishQuiz(channel, game);
+  }
 
-  const embed = new EmbedBuilder()
-    .setColor(COLORS.blue)
-    .setTitle(
-      `🧠 Quiz — Soal ${game.index + 1}/${game.questions.length}`
-    )
-    .setDescription(
-      `**${q.question}**\n\n` +
-      q.options
-        .map((x, i) => `**${'ABCD'[i]}.** ${x}`)
-        .join('\n')
-    )
-    .addFields(
-      {
-        name: 'Kategori',
-        value: q.category,
-        inline: true
-      },
-      {
-        name: 'Kesulitan',
-        value: q.difficulty,
-        inline: true
-      }
-    )
-    .setFooter({
-      text: 'Pilih jawaban menggunakan tombol di bawah.'
-    });
+  const question =
+    game.questions[game.index];
 
-  game.message = await channel.send({
+  const options =
+    shuffle(question.options);
+
+  game.currentQuestion = {
+    ...question,
+    shuffledOptions: options
+  };
+
+  const embed =
+    new EmbedBuilder()
+      .setColor(COLORS.blue)
+      .setTitle(
+        `🧠 Quiz — Soal ${game.index + 1}/${game.questions.length}`
+      )
+      .setDescription(
+        `**${question.question}**`
+      )
+      .addFields({
+        name: '🏆 Skor',
+        value: `${game.score} poin`,
+        inline: true
+      });
+
+  await channel.send({
     embeds: [embed],
-    components: [quizButtons()]
+    components: [
+      createQuizButtons(options)
+    ]
   });
 }
 
 async function finishQuiz(channel, game) {
-  const ranking = [...game.scores.entries()]
-    .sort((a, b) => b[1].points - a[1].points);
-
-  const lines =
-    ranking
-      .map(
-        ([id, s], i) =>
-          `${i + 1}. ${mentionUser(id)} — **${s.points} poin** (${s.correct} benar)`
-      )
-      .join('\n') || 'Belum ada jawaban.';
-
-  const embed = new EmbedBuilder()
-    .setColor(COLORS.gold)
-    .setTitle('🏆 Quiz selesai!')
-    .setDescription(lines)
-    .setFooter({
-      text: 'Gunakan /leaderboard untuk melihat peringkat global.'
-    });
+  const embed =
+    new EmbedBuilder()
+      .setColor(COLORS.gold)
+      .setTitle('🏆 Quiz selesai!')
+      .setDescription(
+        `Skor akhir: **${game.score} poin**\n\n` +
+        `Benar: **${game.correct}**\n` +
+        `Salah: **${game.wrong}**`
+      );
 
   await channel.send({
     embeds: [embed]
@@ -145,55 +363,49 @@ async function startQuiz(interaction) {
   if (games.has(interaction.channelId)) {
     return interaction.reply({
       content:
-        '⚠️ Sudah ada permainan aktif di channel ini. Gunakan `/stopgame` untuk menghentikannya.',
+        '⚠️ Sudah ada permainan aktif di channel ini.',
       ephemeral: true
     });
   }
 
-  const jumlah =
-    interaction.options.getInteger('jumlah') || 10;
-
-  const kesulitan =
-    interaction.options.getString('kesulitan');
-
-  let availableQuestions = [...questions];
-
-  if (kesulitan) {
-    availableQuestions = availableQuestions.filter(
-      q => q.difficulty === kesulitan
+  const selected =
+    shuffle(questions).slice(
+      0,
+      Math.min(10, questions.length)
     );
-  }
 
-  if (availableQuestions.length === 0) {
+  if (selected.length === 0) {
     return interaction.reply({
       content:
-        `❌ Tidak ada soal dengan tingkat kesulitan **${kesulitan}**.`,
+        '❌ Database quiz kosong.',
       ephemeral: true
     });
   }
-
-  const selected = shuffle(availableQuestions)
-    .slice(0, jumlah);
 
   const game = {
     type: 'quiz',
-    index: 0,
+
     questions: selected,
-    scores: new Map(),
-    message: null
+
+    index: 0,
+
+    score: 0,
+
+    correct: 0,
+
+    wrong: 0,
+
+    answered: false
   };
 
-  games.set(interaction.channelId, game);
-
-  const difficultyText =
-    kesulitan || 'Semua tingkat kesulitan';
+  games.set(
+    interaction.channelId,
+    game
+  );
 
   await interaction.reply({
     content:
-      `🎯 **Quiz dimulai!**\n` +
-      `📝 Soal: **${selected.length}**\n` +
-      `📊 Kesulitan: **${difficultyText}**\n\n` +
-      `Siapa cepat dia dapat poin!`
+      '🧠 **Quiz dimulai!**'
   });
 
   await sendQuizQuestion(
@@ -202,37 +414,54 @@ async function startQuiz(interaction) {
   );
 }
 
-// =====================================================
-// TYPING QUIZ
-// =====================================================
+/*
+==================================================
+TYPING QUIZ
+==================================================
+*/
 
 async function sendTypingQuestion(channel, game) {
-  const q = game.questions[game.index];
+  if (game.index >= game.questions.length) {
+    const embed =
+      new EmbedBuilder()
+        .setColor(COLORS.gold)
+        .setTitle('⌨️ Typing Quiz selesai!')
+        .setDescription(
+          `🏆 Skor: **${game.score} poin**\n` +
+          `✅ Benar: **${game.correct}**\n` +
+          `❌ Salah: **${game.wrong}**`
+        );
 
-  const embed = new EmbedBuilder()
-    .setColor(COLORS.purple)
-    .setTitle(
-      `⌨️ Typing Quiz — Soal ${game.index + 1}/${game.questions.length}`
-    )
-    .setDescription(`**${q.question}**`)
-    .addFields(
-      {
-        name: 'Kategori',
-        value: q.category,
-        inline: true
-      },
-      {
-        name: 'Kesulitan',
-        value: q.difficulty,
-        inline: true
-      }
-    )
-    .setFooter({
-      text: 'Ketik jawabanmu langsung di chat.'
+    await channel.send({
+      embeds: [embed]
     });
 
+    games.delete(channel.id);
+
+    return;
+  }
+
+  const question =
+    game.questions[game.index];
+
+  game.currentQuestion =
+    question;
+
   await channel.send({
-    embeds: [embed]
+    embeds: [
+      new EmbedBuilder()
+        .setColor(COLORS.blue)
+        .setTitle(
+          `⌨️ Typing Quiz ${game.index + 1}/${game.questions.length}`
+        )
+        .setDescription(
+          `**${question.question}**`
+        )
+        .setFooter({
+          text:
+            'Ketik jawabanmu di chat.'
+        })
+    ]
   });
 }
 
@@ -240,55 +469,47 @@ async function startTypingQuiz(interaction) {
   if (games.has(interaction.channelId)) {
     return interaction.reply({
       content:
-        '⚠️ Sudah ada permainan aktif di channel ini. Gunakan `/stopgame` untuk menghentikannya.',
+        '⚠️ Sudah ada permainan aktif di channel ini.',
       ephemeral: true
     });
   }
 
-  const jumlah =
-    interaction.options.getInteger('jumlah') || 10;
-
-  const kesulitan =
-    interaction.options.getString('kesulitan');
-
-  let availableQuestions = [...typingQuestions];
-
-  if (kesulitan) {
-    availableQuestions = availableQuestions.filter(
-      q => q.difficulty === kesulitan
+  const selected =
+    shuffle(typingQuestions).slice(
+      0,
+      Math.min(10, typingQuestions.length)
     );
-  }
 
-  if (availableQuestions.length === 0) {
+  if (selected.length === 0) {
     return interaction.reply({
       content:
-        `❌ Tidak ada soal typing quiz dengan tingkat kesulitan **${kesulitan}**.`,
+        '❌ Database typing quiz kosong.',
       ephemeral: true
     });
   }
 
-  const selected = shuffle(availableQuestions)
-    .slice(0, jumlah);
-
   const game = {
-    type: 'typingquiz',
-    index: 0,
+    type: 'typing',
+
     questions: selected,
-    scores: new Map(),
-    timeout: null
+
+    index: 0,
+
+    score: 0,
+
+    correct: 0,
+
+    wrong: 0
   };
 
-  games.set(interaction.channelId, game);
-
-  const difficultyText =
-    kesulitan || 'Semua tingkat kesulitan';
+  games.set(
+    interaction.channelId,
+    game
+  );
 
   await interaction.reply({
     content:
-      `⌨️ **Typing Quiz dimulai!**\n` +
-      `📝 Soal: **${selected.length}**\n` +
-      `📊 Kesulitan: **${difficultyText}**\n\n` +
-      `Ketik jawaban langsung di chat!`
+      '⌨️ **Typing Quiz dimulai!**'
   });
 
   await sendTypingQuestion(
@@ -296,172 +517,216 @@ async function startTypingQuiz(interaction) {
     game
   );
 }
-// =====================================================
-// SAMBUNG KATA
-// =====================================================
 
-async function startWord(interaction) {
-  if (games.has(interaction.channelId)) {
-    return interaction.reply({
-      content:
-        '⚠️ Sudah ada permainan aktif di channel ini. Gunakan `/stopgame` untuk menghentikannya.',
-      ephemeral: true
-    });
-  }
+/*
+==================================================
+SLASH COMMANDS
+==================================================
+*/
 
-  const word =
-    words[Math.floor(Math.random() * words.length)];
+client.on(
+  'interactionCreate',
+  async interaction => {
 
-  const game = {
-    type: 'word',
-    current: word,
-    used: new Set([word]),
-    lastUser: null,
-    chain: 0,
-    timeout: null
-  };
-
-  games.set(interaction.channelId, game);
-
-  await interaction.reply({
-    embeds: [
-      new EmbedBuilder()
-        .setColor(COLORS.purple)
-        .setTitle('🔗 Sambung Kata dimulai!')
-        .setDescription(
-          `Kata awal: **${word}**\n\n` +
-          `Ketik kata baru yang **diawali huruf terakhir** dari kata sebelumnya.\n` +
-          `Contoh: **${word.slice(-1)}...**`
-        )
-        .setFooter({
-          text:
-            'Kata minimal 3 huruf. Tidak boleh mengulang kata.'
-        })
-    ]
-  });
-
-  resetWordTimeout(interaction.channel, game);
-}
-
-function resetWordTimeout(channel, game) {
-  if (game.timeout) {
-    clearTimeout(game.timeout);
-  }
-
-  game.timeout = setTimeout(() => {
-    if (games.get(channel.id) === game) {
-      channel.send(
-        `⏰ Permainan sambung kata berakhir karena tidak ada jawaban selama 60 detik. Rantai: **${game.chain}** kata.`
-      );
-
-      games.delete(channel.id);
-    }
-  }, 60000);
-}
-
-// =====================================================
-// INTERACTION CREATE
-// =====================================================
-
-client.on('interactionCreate', async interaction => {
-  try {
-    // =========================
-    // SLASH COMMAND
-    // =========================
-
+    /*
+    COMMAND
+    */
     if (interaction.isChatInputCommand()) {
-      switch (interaction.commandName) {
 
-        case 'quiz':
-          return startQuiz(interaction);
+      try {
 
-        case 'typingquiz':
-          return startTypingQuiz(interaction);
+        if (
+          interaction.commandName ===
+          'quiz'
+        ) {
+          return startQuiz(
+            interaction
+          );
+        }
 
-        case 'sambungkata':
-          return startWord(interaction);
+        if (
+          interaction.commandName ===
+          'typingquiz'
+        ) {
+          return startTypingQuiz(
+            interaction
+          );
+        }
 
-        case 'bantuan':
+        if (
+          interaction.commandName ===
+          'sambungkata'
+        ) {
+          return startWord(
+            interaction
+          );
+        }
+
+        if (
+          interaction.commandName ===
+          'bantuan'
+        ) {
           return interaction.reply({
             embeds: [
               new EmbedBuilder()
-                .setColor(COLORS.blue)
-                .setTitle('📚 Bantuan Bot')
+                .setColor(
+                  COLORS.blue
+                )
+                .setTitle(
+                  '📖 Bantuan Bot'
+                )
                 .setDescription(
-                  '`/quiz [jumlah] [kesulitan]` — mulai quiz pilihan ganda\n' +
-                  '`/typingquiz [jumlah] [kesulitan]` — quiz dengan mengetik jawaban\n' +
-                  '`/sambungkata` — mulai sambung kata\n' +
-                  '`/skor [user]` — lihat statistik\n' +
-                  '`/leaderboard` — peringkat global\n' +
-                  '`/stopgame` — hentikan game di channel\n' +
-                  '`/reset-skor` — reset semua skor (admin)'
+                  '**🎮 Game**\n' +
+                  '`/quiz` — Quiz pilihan ganda\n' +
+                  '`/typingquiz` — Quiz mengetik\n' +
+                  '`/sambungkata` — Sambung Kata\n\n' +
+
+                  '**🏆 Statistik**\n' +
+                  '`/skor` — Lihat skor\n' +
+                  '`/leaderboard` — Leaderboard\n\n' +
+
+                  '**⚙️ Lainnya**\n' +
+                  '`/stopgame` — Hentikan game aktif'
                 )
-                .setFooter({
-                  text: 'Bot Quiz & Sambung Kata Indonesia'
-                })
-            ]
-          });
-
-        case 'leaderboard': {
-          const list = store.leaderboard(10);
-
-          const text = list.length
-            ? list
-                .map(
-                  (u, i) =>
-                    `**${i + 1}.** ${u.username} — **${u.points} poin** | ${u.correct} benar | ${u.wrong} salah`
-                )
-                .join('\n')
-            : 'Belum ada skor.';
-
-          return interaction.reply({
-            embeds: [
-              new EmbedBuilder()
-                .setColor(COLORS.gold)
-                .setTitle('🏆 Leaderboard Global')
-                .setDescription(text)
             ]
           });
         }
 
-        case 'skor': {
-          const user =
-            interaction.options.getUser('user') ||
-            interaction.user;
+        if (
+          interaction.commandName ===
+          'stopgame'
+        ) {
 
-          const s =
-            store.getUser(user.id) || {
-              points: 0,
-              correct: 0,
-              wrong: 0,
-              games: 0
-            };
+          const game =
+            games.get(
+              interaction.channelId
+            );
+
+          if (!game) {
+            return interaction.reply({
+              content:
+                'ℹ️ Tidak ada game aktif di channel ini.',
+              ephemeral: true
+            });
+          }
+
+          if (game.timeout) {
+            clearTimeout(
+              game.timeout
+            );
+          }
+
+          games.delete(
+            interaction.channelId
+          );
+
+          return interaction.reply({
+            content:
+              '🛑 Game berhasil dihentikan.'
+          });
+        }
+
+        if (
+          interaction.commandName ===
+          'leaderboard'
+        ) {
+          if (
+            typeof store.getLeaderboard !==
+            'function'
+          ) {
+            return interaction.reply({
+              content:
+                '⚠️ Fungsi leaderboard belum tersedia di store.js.',
+              ephemeral: true
+            });
+          }
+
+          const leaderboard =
+            store.getLeaderboard();
+
+          if (
+            !leaderboard ||
+            leaderboard.length === 0
+          ) {
+            return interaction.reply({
+              content:
+                '📊 Belum ada data leaderboard.',
+              ephemeral: true
+            });
+          }
+
+          const text =
+            leaderboard
+              .slice(0, 10)
+              .map(
+                (user, index) =>
+                  `**${index + 1}.** ${mentionUser(user.id)} — **${user.points || 0} poin**`
+              )
+              .join('\n');
 
           return interaction.reply({
             embeds: [
               new EmbedBuilder()
-                .setColor(COLORS.green)
-                .setTitle(`📊 Statistik ${user.username}`)
-                .setThumbnail(user.displayAvatarURL())
+                .setColor(
+                  COLORS.gold
+                )
+                .setTitle(
+                  '🏆 Leaderboard'
+                )
+                .setDescription(
+                  text
+                )
+            ]
+          });
+        }
+
+        if (
+          interaction.commandName ===
+          'skor'
+        ) {
+
+          if (
+            typeof store.getStats !==
+            'function'
+          ) {
+            return interaction.reply({
+              content:
+                '⚠️ Fungsi skor belum tersedia di store.js.',
+              ephemeral: true
+            });
+          }
+
+          const stats =
+            store.getStats(
+              interaction.user.id
+            );
+
+          return interaction.reply({
+            embeds: [
+              new EmbedBuilder()
+                .setColor(
+                  COLORS.gold
+                )
+                .setTitle(
+                  `📊 Statistik ${interaction.user.username}`
+                )
                 .addFields(
                   {
-                    name: 'Poin',
-                    value: String(s.points),
+                    name: '🏆 Poin',
+                    value:
+                      `${stats?.points || 0}`,
                     inline: true
                   },
                   {
-                    name: 'Benar',
-                    value: String(s.correct),
+                    name: '✅ Benar',
+                    value:
+                      `${stats?.correct || 0}`,
                     inline: true
                   },
                   {
-                    name: 'Salah',
-                    value: String(s.wrong),
-                    inline: true
-                  },
-                  {
-                    name: 'Game',
-                    value: String(s.games),
+                    name: '🎮 Game',
+                    value:
+                      `${stats?.games || 0}`,
                     inline: true
                   }
                 )
@@ -469,342 +734,495 @@ client.on('interactionCreate', async interaction => {
           });
         }
 
-        case 'stopgame': {
-          const game = games.get(interaction.channelId);
+        if (
+          interaction.commandName ===
+          'reset-skor'
+        ) {
 
-          if (!game) {
+          if (
+            !interaction.memberPermissions?.has(
+              'Administrator'
+            )
+          ) {
             return interaction.reply({
-              content: 'Tidak ada game aktif.',
+              content:
+                '❌ Kamu harus menjadi administrator untuk menggunakan command ini.',
               ephemeral: true
             });
           }
 
-          if (game.timeout) {
-            clearTimeout(game.timeout);
+          if (
+            typeof store.resetStats ===
+            'function'
+          ) {
+            store.resetStats();
           }
 
-          games.delete(interaction.channelId);
-
-          return interaction.reply(
-            '🛑 Game dihentikan oleh moderator.'
-          );
+          return interaction.reply({
+            content:
+              '♻️ Semua skor berhasil direset.'
+          });
         }
 
-        case 'reset-skor':
-          store.resetAll();
+      } catch (error) {
 
-          return interaction.reply(
-            '♻️ Semua skor berhasil direset.'
-          );
-      }
-    }
-
-    // =========================
-    // TOMBOL QUIZ
-    // =========================
-
-    if (
-      interaction.isButton() &&
-      interaction.customId.startsWith('quiz:')
-    ) {
-      const game = games.get(interaction.channelId);
-
-      if (!game || game.type !== 'quiz') {
-        return interaction.reply({
-          content: 'Game sudah selesai.',
-          ephemeral: true
-        });
-      }
-
-      const choice = Number(
-        interaction.customId.split(':')[1]
-      );
-
-      const q = game.questions[game.index];
-
-      if (!game.scores.has(interaction.user.id)) {
-        game.scores.set(interaction.user.id, {
-          points: 0,
-          correct: 0,
-          wrong: 0
-        });
-      }
-
-      const score =
-        game.scores.get(interaction.user.id);
-
-      const correct = choice === q.answer;
-
-      if (correct) {
-        score.points += 10;
-        score.correct++;
-
-        store.addStats(interaction.user, {
-          points: 10,
-          correct: 1,
-          games: 1
-        });
-      } else {
-        score.points = Math.max(
-          0,
-          score.points - 3
+        console.error(
+          '❌ Error interaction:',
+          error
         );
-
-        score.wrong++;
-
-        store.addStats(interaction.user, {
-          points: -3,
-          wrong: 1,
-          games: 1
-        });
-      }
-
-      await interaction.update({
-        embeds: [
-          new EmbedBuilder()
-            .setColor(
-              correct
-                ? COLORS.green
-                : COLORS.red
-            )
-            .setTitle(
-              correct
-                ? '✅ Benar!'
-                : '❌ Salah!'
-            )
-            .setDescription(
-              `${mentionUser(interaction.user.id)} ${
-                correct
-                  ? 'mendapat **+10 poin**.'
-                  : `kehilangan **3 poin**. Jawaban benar: **${'ABCD'[q.answer]}. ${q.options[q.answer]}**`
-              }`
-            )
-        ],
-        components: [quizButtons(true)]
-      });
-
-      setTimeout(async () => {
-        if (!games.has(interaction.channelId)) {
-          return;
-        }
-
-        game.index++;
 
         if (
-          game.index >=
-          game.questions.length
+          interaction.replied ||
+          interaction.deferred
         ) {
-          return finishQuiz(
-            interaction.channel,
-            game
-          );
+          await interaction.followUp({
+            content:
+              '❌ Terjadi kesalahan pada bot.',
+            ephemeral: true
+          }).catch(() => {});
+        } else {
+          await interaction.reply({
+            content:
+              '❌ Terjadi kesalahan pada bot.',
+            ephemeral: true
+          }).catch(() => {});
         }
+      }
 
-        await sendQuizQuestion(
-          interaction.channel,
-          game
-        );
-      }, 1200);
+      return;
     }
 
-  } catch (err) {
-    console.error(err);
-
+    /*
+    BUTTON QUIZ
+    */
     if (
-      !interaction.replied &&
-      !interaction.deferred
+      interaction.isButton()
     ) {
-      await interaction
-        .reply({
+
+      if (
+        !interaction.customId.startsWith(
+          'quiz_'
+        )
+      ) {
+        return;
+      }
+
+      const game =
+        games.get(
+          interaction.channelId
+        );
+
+      if (
+        !game ||
+        game.type !== 'quiz'
+      ) {
+        return interaction.reply({
           content:
-            'Terjadi kesalahan. Cek log bot.',
+            '❌ Game ini sudah selesai.',
           ephemeral: true
-        })
-        .catch(() => {});
-    }
-  }
-});
+        });
+      }
 
-// =====================================================
-// MESSAGE CREATE
-// UNTUK TYPING QUIZ + SAMBUNG KATA
-// =====================================================
+      if (game.answered) {
+        return interaction.reply({
+          content:
+            '⚠️ Soal ini sudah dijawab.',
+          ephemeral: true
+        });
+      }
 
-client.on('messageCreate', async message => {
-  if (message.author.bot || !message.guild) {
-    return;
-  }
+      game.answered = true;
 
-  const game = games.get(message.channel.id);
+      const selectedIndex =
+        Number(
+          interaction.customId
+            .replace('quiz_', '')
+        );
 
-  if (!game) {
-    return;
-  }
+      const selectedAnswer =
+        game.currentQuestion
+          .shuffledOptions[
+            selectedIndex
+          ];
 
-  // =========================
-  // TYPING QUIZ
-  // =========================
+      const correctAnswer =
+        game.currentQuestion.answer;
 
-  if (game.type === 'typingquiz') {
-    const q = game.questions[game.index];
+      const correct =
+        normalizeWord(
+          selectedAnswer
+        ) ===
+        normalizeWord(
+          correctAnswer
+        );
 
-    const userAnswer =
-      normalizeAnswer(message.content);
+      if (correct) {
 
-    const correctAnswers =
-      q.answer.map(answer =>
-        normalizeAnswer(answer)
-      );
+        game.score += 10;
 
-    const correct =
-      correctAnswers.includes(userAnswer);
+        game.correct++;
 
-    if (!game.scores.has(message.author.id)) {
-      game.scores.set(message.author.id, {
-        points: 0,
-        correct: 0,
-        wrong: 0
-      });
-    }
+        store.addStats(
+          interaction.user,
+          {
+            points: 10,
+            correct: 1,
+            games: 1
+          }
+        );
 
-    const score =
-      game.scores.get(message.author.id);
+        await interaction.reply({
+          content:
+            `✅ Benar! Kamu mendapatkan **+10 poin**.`
+        });
 
-    if (correct) {
-      score.points += 10;
-      score.correct++;
+      } else {
 
-      store.addStats(message.author, {
-        points: 10,
-        correct: 1,
-        games: 1
-      });
+        game.wrong++;
 
-      await message.reply(
-        `✅ **Benar!** ${mentionUser(message.author.id)} mendapat **+10 poin**!`
-      );
+        await interaction.reply({
+          content:
+            `❌ Salah!\nJawaban yang benar: **${correctAnswer}**`
+        });
+      }
 
       game.index++;
 
-      if (
-        game.index >=
-        game.questions.length
-      ) {
-        const ranking =
-          [...game.scores.entries()]
-            .sort(
-              (a, b) =>
-                b[1].points -
-                a[1].points
-            );
+      game.answered = false;
 
-        const lines =
-          ranking
-            .map(
-              ([id, s], i) =>
-                `${i + 1}. ${mentionUser(id)} — **${s.points} poin** (${s.correct} benar)`
-            )
-            .join('\n');
+      setTimeout(() => {
+        sendQuizQuestion(
+          interaction.channel,
+          game
+        ).catch(console.error);
+      }, 1000);
+    }
+  }
+);
 
-        await message.channel.send({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(COLORS.gold)
-              .setTitle(
-                '🏆 Typing Quiz selesai!'
-              )
-              .setDescription(
-                lines ||
-                  'Belum ada jawaban.'
-              )
-          ]
-        });
+/*
+==================================================
+MESSAGE CREATE
+==================================================
+*/
 
-        games.delete(
-          message.channel.id
+client.on(
+  'messageCreate',
+  async message => {
+
+    /*
+    Jangan proses bot.
+    */
+    if (
+      message.author.bot
+    ) {
+      return;
+    }
+
+    /*
+    Hanya guild.
+    */
+    if (
+      !message.guild
+    ) {
+      return;
+    }
+
+    const game =
+      games.get(
+        message.channelId
+      );
+
+    if (!game) {
+      return;
+    }
+
+    /*
+    ==============================================
+    TYPING QUIZ
+    ==============================================
+    */
+
+    if (
+      game.type === 'typing'
+    ) {
+
+      const answer =
+        normalizeWord(
+          message.content
         );
 
+      const expected =
+        normalizeWord(
+          game.currentQuestion.answer
+        );
+
+      if (!answer) {
         return;
       }
+
+      if (
+        answer === expected
+      ) {
+
+        game.score += 10;
+
+        game.correct++;
+
+        store.addStats(
+          message.author,
+          {
+            points: 10,
+            correct: 1,
+            games: 1
+          }
+        );
+
+        await message.react(
+          '✅'
+        ).catch(() => {});
+
+        await message.channel.send(
+          `⌨️ **Benar!** ${mentionUser(message.author.id)} mendapatkan **+10 poin**.`
+        );
+
+      } else {
+
+        game.wrong++;
+
+        await message.react(
+          '❌'
+        ).catch(() => {});
+
+        await message.channel.send(
+          `❌ Salah, ${mentionUser(message.author.id)}.`
+        );
+      }
+
+      game.index++;
 
       await sendTypingQuestion(
         message.channel,
         game
       );
+
+      return;
     }
 
-    return;
-  }
+    /*
+    ==============================================
+    SAMBUNG KATA
+    ==============================================
+    */
 
-  // =========================
-  // SAMBUNG KATA
-  // =========================
+    if (
+      game.type !== 'word'
+    ) {
+      return;
+    }
 
-  if (game.type !== 'word') {
-    return;
-  }
+    /*
+    Ambil teks mentah.
+    */
+    const rawAnswer =
+      message.content
+        .trim()
+        .toLowerCase();
 
-  const word =
-    normalizeWord(message.content);
+    /*
+    HARUS HANYA HURUF.
+    
+    Jadi:
+    rumah       ✅
+    rumah123    ❌
+    rumah!      ❌
+    rumah dua   ❌
+    */
+    if (
+      !/^[a-z]+$/.test(
+        rawAnswer
+      )
+    ) {
 
-  if (
-    word.length < 3 ||
-    !/^[a-z]+$/.test(word)
-  ) {
-    return;
-  }
+      await wordMistake(
+        message,
+        game,
+        'Jawaban hanya boleh berisi huruf tanpa angka, simbol, atau spasi.'
+      );
 
-  const expected =
-    normalizeWord(game.current).slice(-1);
+      return;
+    }
 
-  if (word[0] !== expected) {
-    return;
-  }
+    /*
+    Minimal 3 huruf.
+    */
+    if (
+      rawAnswer.length < 3
+    ) {
 
-  if (game.used.has(word)) {
-    return message.reply(
-      '🔁 Kata itu sudah dipakai. Coba kata lain.'
+      await wordMistake(
+        message,
+        game,
+        'Kata harus memiliki minimal **3 huruf**.'
+      );
+
+      return;
+    }
+
+    /*
+    Normalisasi.
+    */
+    const answer =
+      normalizeWord(
+        rawAnswer
+      );
+
+    /*
+    Pastikan kata benar-benar
+    terdapat di database.
+    */
+    if (
+      !isValidWord(answer)
+    ) {
+
+      await wordMistake(
+        message,
+        game,
+        `**${answer}** tidak ditemukan di database kata.`
+      );
+
+      return;
+    }
+
+    /*
+    Tidak boleh mengulang.
+    */
+    if (
+      game.used.has(answer)
+    ) {
+
+      await wordMistake(
+        message,
+        game,
+        `Kata **${answer}** sudah pernah digunakan.`
+      );
+
+      return;
+    }
+
+    /*
+    Cek awalan yang diwajibkan.
+    */
+    const required =
+      game.requiredLetters;
+
+    if (
+      !answer.startsWith(
+        required
+      )
+    ) {
+
+      await wordMistake(
+        message,
+        game,
+        `Kata harus diawali **${required.toUpperCase()}**.`
+      );
+
+      return;
+    }
+
+    /*
+    ==============================================
+    JAWABAN BENAR
+    ==============================================
+    */
+
+    game.used.add(
+      answer
+    );
+
+    game.current =
+      answer;
+
+    game.lastUser =
+      message.author.id;
+
+    game.chain++;
+
+    store.addStats(
+      message.author,
+      {
+        points: 5,
+        correct: 1,
+        games: 1
+      }
+    );
+
+    /*
+    Setelah jawaban benar,
+    tentukan awalan baru.
+
+    Jika sudah >60 detik,
+    random lagi antara 2 atau 3 huruf.
+    */
+    updateRequiredLetters(
+      game
+    );
+
+    /*
+    Reset timer 60 detik
+    karena ada jawaban.
+    */
+    resetWordTimeout(
+      message.channel,
+      game
+    );
+
+    await message.react(
+      '✅'
+    ).catch(() => {});
+
+    await message.channel.send(
+      `🔗 **${answer}**\n\n` +
+
+      `✅ ${mentionUser(message.author.id)} mendapatkan **+5 poin**!\n\n` +
+
+      `➡️ Selanjutnya harus diawali:\n` +
+
+      `# **${game.requiredLetters.toUpperCase()}**\n\n` +
+
+      `❤️ Kesalahan: **${game.mistakes}/3**\n` +
+
+      `🔗 Rantai: **${game.chain}** kata`
     );
   }
-
-  game.used.add(word);
-  game.current = word;
-  game.lastUser =
-    message.author.id;
-  game.chain++;
-
-  store.addStats(message.author, {
-    points: 5,
-    correct: 1,
-    games: 1
-  });
-
-  await message
-    .react('✅')
-    .catch(() => {});
-
-  await message.channel.send(
-    `🔗 **${word}** — ${mentionUser(message.author.id)} mendapat **+5 poin**! Selanjutnya harus diawali huruf **${word.slice(-1).toUpperCase()}**.`
-  );
-
-  resetWordTimeout(
-    message.channel,
-    game
-  );
-});
-
-// =====================================================
-// BOT READY
-// =====================================================
-
-client.once(
-  'clientReady',
-  () =>
-    console.log(
-      `🤖 ${client.user.tag} online dan siap bermain!`
-    )
 );
 
+/*
+==================================================
+READY
+==================================================
+*/
+
+client.once(
+  'ready',
+  () => {
+    console.log(
+      `✅ Bot online sebagai ${client.user.tag}`
+    );
+
+    console.log(
+      `📚 Database Sambung Kata: ${getWordCount().toLocaleString('id-ID')} kata`
+    );
+  }
+);
+
+/*
+==================================================
+LOGIN
+==================================================
+*/
+
 client.login(
-  process.env.DISCORD_TOKEN
+  DISCORD_TOKEN
 );
