@@ -1205,7 +1205,7 @@ READY
 */
 
 client.once(
-  'ready',
+  'clientready',
   () => {
     console.log(
       `✅ Bot online sebagai ${client.user.tag}`
